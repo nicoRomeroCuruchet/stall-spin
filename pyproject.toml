@@ -1,0 +1,29 @@
+[tool.ruff]
+# Nivel de compatibilidad con tu versión de Python
+target-version = "py311"
+line-length = 88 # Estándar de Black/Ruff
+
+[tool.ruff.lint]
+# Reglas seleccionadas para un programador experimentado
+select = [
+    "E",   # Errores de Pycodestyle
+    "F",   # Pyflakes (detección de bugs lógicos)
+    "I",   # Isort (orden automático de imports)
+    "NPY", # Reglas específicas de NumPy (Clave para tu caso)
+    "D",   # Pydocstyle (Para que tus docstrings de tesis sean perfectos)
+    "UP",  # Pyupgrade (Mantiene el código moderno)
+    "S",   # Bandit (Seguridad, te avisará sobre el uso de pickle)
+]
+
+ignore = [
+    "D100", # No es obligatorio docstring en el nivel de módulo
+    "S301", # Ignorar alerta de pickle (ya que lo usas para tus modelos)
+]
+
+[tool.ruff.lint.pydocstyle]
+# Estilo de docstrings recomendado para computación científica
+convention = "numpy" 
+
+[tool.ruff.lint.isort]
+# Organiza los imports de forma jerárquica
+known-first-party = ["airplane", "utils"]
