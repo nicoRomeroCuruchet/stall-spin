@@ -14,18 +14,16 @@ from utils.utils import get_barycentric_weights_and_indices, get_optimal_action
 # Configure logger
 logger = logging.getLogger(__name__)
 
-
 def train_or_load_policy(
     file_name: str = "ReducedSymmetricGliderPullout_policy.pkl",
 ) -> PolicyIteration:
-    """
-    Load an existing policy from disk or train a new one if it does not exist.
-    """
+    """Load an existing policy from disk or train a new one if it does not exist."""
     print("[*] Training new policy...")
     glider = ReducedSymmetricGliderPullout()
 
-    # Define the discretization grid for the state space
-    # We provide a small extra margin (-95 to +5) so the terminal state is reached cleanly
+    # Define the discretization grid for the state space.
+    # We provide a small extra margin (-95 to +5) so the terminal state
+    # is reached cleanly.
     bins_space = {
         "flight_path_angle": np.linspace(
             np.deg2rad(-180), np.deg2rad(0), 100, dtype=np.float32
@@ -54,7 +52,6 @@ def train_or_load_policy(
 
     pi.run()
     return pi
-
 
 def plot_policy_and_value(pi: PolicyIteration) -> None:
     """
@@ -123,13 +120,10 @@ def plot_policy_and_value(pi: PolicyIteration) -> None:
     print(f"[*] Plot successfully saved to: {output_path.resolve()}")
     plt.close()
 
-
 def simulate_and_plot_trajectories(
     pi: PolicyIteration, initial_conditions: list
 ) -> None:
-    """
-    Simulate and plot kinematic behavior for different initial states.
-    """
+    """Simulate and plot kinematic behavior for different initial states."""
     print(f"[*] Simulating {len(initial_conditions)} trajectories...")
 
     glider = ReducedSymmetricGliderPullout()
@@ -216,7 +210,6 @@ def simulate_and_plot_trajectories(
     print(f"[*] Plot successfully saved to: {output_path.resolve()}")
     plt.close()
 
-
 def get_parula_cmap() -> LinearSegmentedColormap:
     """
     Create a highly accurate approximation of MATLAB's proprietary parula colormap.
@@ -234,7 +227,6 @@ def get_parula_cmap() -> LinearSegmentedColormap:
         (0.9769, 0.9839, 0.0805),  # Bright yellow
     ]
     return LinearSegmentedColormap.from_list("parula_approx", parula_anchors)
-
 
 def plot_altitude_loss_heatmap(
     pi: Any,
@@ -342,7 +334,6 @@ def plot_altitude_loss_heatmap(
     plt.close(fig)
 
     logger.info(f"Heatmap successfully saved to: {file_path.resolve()}")
-
 
 if __name__ == "__main__":
     # 1. Train or load the optimal policy
