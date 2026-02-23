@@ -58,6 +58,60 @@ class ReducedSymmetricGliderPullout(AirplaneEnv):
         
         return observation.flatten(), {}
 
+    def step(self, action: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool, dict]:
+        """
+        Execute one or more time steps using vectorized operations.
+        
+        This implementation supports both single-step execution and high-performance
+        batch simulation for heatmap generation.
+        """
+        # Standardize input as a 2D batch for consistent matrix operations
+        # This handles both a single action [cl] and a batch of actions [[cl1], [cl2], ...]
+        action_batch = np.atleast_2d(action)
+        
+        # Synchronize physics engine with the current environment state batch
+        self.airplane.flight_path_angle = self.state[:, 0].copy() 
+        self.airplane.airspeed_norm = self.state[:, 1].copy() 
+
+        # Extract and clip the lift coefficient from the action batch
+        c_lift = np.clip(
+            action_batch[:, 0], 
+            self.action_space.low[0], 
+            self.action_space.high[0]
+        )
+        
+        # Evaluate terminal conditions before the integration step
+        init_terminal, _ = self.terminal(self.state)
+        
+        # Command the aircraft (Throttle and Aileron are 0 for the glider)
+        self.airplane.command_airplane(c_lift, 0.0, 0.0)
+
+        # Vectorized altitude loss calculation (Reward)
+        # Reward = dt * V * sin(gamma) * Vs
+        reward = (
+            self.airplane.TIME_STEP 
+            * self.airplane.airspeed_norm 
+            * np.sin(self.airplane.flight_path_angle) 
+            * self.airplane.STALL_AIRSPEED
+        )
+    
+        # Capture new observations and evaluate post-step termination
+        obs = self._get_obs()
+        terminated, _ = self.terminal(obs) 
+        terminated |= init_terminal
+        
+        # Zero out rewards for trajectories that were already terminal
+        reward = np.where(init_terminal, 0.0, reward)
+        
+        # Update the internal state buffer for the next iteration
+        self.state = obs.copy()
+
+        # Compatibility layer for standard Gymnasium API (Non-vectorized calls)
+        if np.asarray(action).ndim < 2:
+            return obs.flatten(), reward.flatten(), terminated.flatten(), False, self._get_info()
+
+        return obs, reward, terminated, False, self._get_info()
+
     def step(self, action: float):
         """Execute one time step within the environment."""
         self.airplane.flight_path_angle = self.state[:, 0].copy() 

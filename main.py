@@ -2,354 +2,242 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
 
 # Internal project imports
 from airplane.reduced_symmetric_glider_pullout import ReducedSymmetricGliderPullout
+from airplane.reduced_symmetric_pullout import ReducedSymmetricPullout
+from airplane.reduced_banked_glider_pullout import ReducedBankedGliderPullout
 from PolicyIteration import PolicyIteration, PolicyIterationConfig
 from utils.utils import get_barycentric_weights_and_indices, get_optimal_action
 
-# Configure logger
+# Configure professional logger
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def train_or_load_policy(
-    file_name: str = "ReducedSymmetricGliderPullout_policy.pkl",
-) -> PolicyIteration:
-    """Load an existing policy from disk or train a new one if it does not exist."""
-    print("[*] Training new policy...")
-    glider = ReducedSymmetricGliderPullout()
+# =====================================================================
+# UTILS: COLORMAPS
+# =====================================================================
 
-    # Define the discretization grid for the state space.
-    # We provide a small extra margin (-95 to +5) so the terminal state
-    # is reached cleanly.
+def get_parula_cmap() -> LinearSegmentedColormap:
+    """
+    Create a highly accurate approximation of MATLAB's proprietary parula colormap.
+    Used for scientific publication matching.
+    """
+    parula_anchors = [
+        (0.2081, 0.1663, 0.5292), (0.0165, 0.4266, 0.8786),
+        (0.0384, 0.6743, 0.7436), (0.4420, 0.7481, 0.5033),
+        (0.8185, 0.7327, 0.3498), (0.9990, 0.7653, 0.2384),
+        (0.9769, 0.9839, 0.0805),
+    ]
+    return LinearSegmentedColormap.from_list("parula_approx", parula_anchors)
+
+# =====================================================================
+# EXPERIMENT SETUPS
+# =====================================================================
+
+def setup_glider_experiment() -> tuple:
+    env = ReducedSymmetricGliderPullout()
     bins_space = {
         "flight_path_angle": np.linspace(
             np.deg2rad(-180), np.deg2rad(0), 100, dtype=np.float32
         ),
         "airspeed_norm": np.linspace(0.7, 4.0, 100, dtype=np.float32),
     }
-
     grid = np.meshgrid(*bins_space.values(), indexing="ij")
     states_space = np.vstack([g.ravel() for g in grid]).astype(np.float32).T
-
-    custom_config = PolicyIterationConfig(
-        gamma=0.99,
-        theta=1e-3,
-        n_steps=200,
-        log=False,
-        log_interval=50,
-        img_path=Path("./img"),
+    action_space = np.linspace(-0.5, 1.0, 20, dtype=np.float32)
+    config = PolicyIterationConfig(
+        gamma=0.99, theta=1e-3, n_steps=100, log=False, log_interval=50, img_path=Path("./img")
     )
+    return env, states_space, action_space, config
 
-    pi = PolicyIteration(
-        env=glider,
-        states_space=states_space,
-        action_space=np.linspace(-0.5, 1.0, 20, dtype=np.float32),
-        config=custom_config,
-    )
 
+def setup_powered_experiment() -> tuple:
+    env = ReducedSymmetricPullout()
+    bins_space = {
+        "flight_path_angle": np.linspace(
+            np.deg2rad(-180), np.deg2rad(0), 100, dtype=np.float32
+        ),
+        "airspeed_norm": np.linspace(0.7, 4.0, 100, dtype=np.float32),
+    }
+    grid = np.meshgrid(*bins_space.values(), indexing="ij")
+    states_space = np.vstack([g.ravel() for g in grid]).astype(np.float32).T
+    
+    cl_vals = np.linspace(-0.5, 1.0, 10, dtype=np.float32)
+    th_vals = np.linspace(0.0, 1.0, 10, dtype=np.float32)
+    action_grid = np.meshgrid(cl_vals, th_vals, indexing="ij")
+    action_space = np.vstack([a.ravel() for a in action_grid]).astype(np.float32).T
+    
+    config = PolicyIterationConfig(
+                    gamma=0.999,             # Discount factor 
+                    theta=1e-3,              # Convergence threshold 
+                    n_steps=1000,            # number of iterations
+                    log=False,               # Enable logging
+                    log_interval=10,         # Update logging more frequently
+                    img_path=Path("./img")   # Custom image save directory
+                )
+
+    return env, states_space, action_space, config
+
+
+def setup_banked_glider_experiment() -> tuple[
+    gym.Env, np.ndarray, np.ndarray, PolicyIterationConfig
+]:
+    """Configure parameters for the 3D State banked glider experiment."""
+    env = ReducedBankedGliderPullout()
+    
+    # FIX 1: Full symmetric grid (-180 to 180) to prevent physics clamping during rolls
+    bins_space = {
+        "flight_path_angle": np.linspace(
+            np.deg2rad(-180), np.deg2rad(0), 40, dtype=np.float32
+        ),
+        "airspeed_norm": np.linspace(0.7, 4.0, 40, dtype=np.float32),
+        "bank_angle": np.linspace(
+            np.deg2rad(-180), np.deg2rad(180), 40, dtype=np.float32
+        )
+    }
+    
+    grid = np.meshgrid(*bins_space.values(), indexing="ij")
+    states_space = np.vstack([g.ravel() for g in grid]).astype(np.float32).T
+    
+    # Action space optimized for Bang-Bang control observation
+    cl_vals = np.linspace(-0.5, 1.0, 5, dtype=np.float32)
+    br_vals = np.linspace(np.deg2rad(-30), np.deg2rad(30), 7, dtype=np.float32)
+    action_grid = np.meshgrid(cl_vals, br_vals, indexing="ij")
+    action_space = np.vstack([a.ravel() for a in action_grid]).astype(np.float32).T
+    
+    config = PolicyIterationConfig(
+                    gamma=0.999,             # Discount factor 
+                    theta=1e-3,              # Convergence threshold 
+                    n_steps=1000,            # number of iterations
+                    log=False,               # Enable logging
+                    log_interval=10,         # Update logging more frequently
+                    img_path=Path("./img")   # Custom image save directory
+                )
+    return env, states_space, action_space, config
+
+# =====================================================================
+# CORE LOGIC
+# =====================================================================
+
+def train_or_load_policy(
+    env: gym.Env, 
+    states: np.ndarray, 
+    actions: np.ndarray, 
+    config: PolicyIterationConfig, 
+    prefix: str
+) -> PolicyIteration:
+    """Load an existing policy or train a new one using the injected configuration."""
+    filename = f"Reduced{prefix.capitalize()}_policy.pkl"
+    path = Path.cwd() / filename
+    
+    if path.exists():
+        logger.info(f"[*] Loading existing policy from {filename}")
+        return PolicyIteration.load(path)
+    
+    logger.info(f"[*] Training new policy for {prefix}...")
+    pi = PolicyIteration(env, states, actions, config)
     pi.run()
     return pi
 
-def plot_policy_and_value(pi: PolicyIteration) -> None:
+# =====================================================================
+# PAPER-STYLE SLICE PLOTTING ENGINE
+# =====================================================================
+
+def plot_paper_style_policy_slice(
+    pi: PolicyIteration, prefix: str, v_slice: float = 1.2
+) -> None:
     """
-    Plot the Value Function and the Optimal Policy over the state space.
-
-    The Value Function colormap is reversed: Red = High altitude loss,
-    Blue = Low altitude loss.
+    Generate a precise, paper-quality discrete grid policy plot.
+    
+    Uses exact 5-degree centroid sampling to perfectly replicate the 
+    reference document's visual rendering.
     """
-    print("[*] Generating Policy and Value Function plots...")
+    if pi.n_dims != 3:
+        logger.warning("Paper style slice requested but environment is not 3D. Skipping.")
+        return
 
-    # Extract unique axis values from the original state space
-    gamma_vals = np.unique(pi.states_space[:, 0])
-    vnorm_vals = np.unique(pi.states_space[:, 1])
-    G, V = np.meshgrid(gamma_vals, vnorm_vals, indexing="ij")
+    logger.info(f"[*] Generating exact paper-style policy slice at V/Vs = {v_slice}...")
 
-    query_points = np.column_stack([G.ravel(), V.ravel()]).astype(np.float32)
-    actions_map = np.zeros(query_points.shape[0])
-    values_map = np.zeros(query_points.shape[0])
+    # FIX 3: Define exact 5-degree edges for the rendering mesh
+    mu_edges = np.linspace(0.0, 180.0, 37)     # 36 cells = 180 deg
+    gamma_edges = np.linspace(-90.0, 0.0, 19)  # 18 cells = 90 deg
+    
+    # Query the PolicyIteration table exactly at the centroid of each visual cell
+    mu_centers = np.deg2rad(mu_edges[:-1] + 2.5)
+    gamma_centers = np.deg2rad(gamma_edges[:-1] + 2.5)
+    
+    M_centers, G_centers = np.meshgrid(mu_centers, gamma_centers, indexing="ij")
 
-    # Evaluate the policy over the entire grid using the O(1) mathematical interpolator
-    for i, pt in enumerate(query_points):
-        # Retrieve optimal action
+    # Stack dimensions matching [Gamma, V/Vs, Mu]
+    query_pts = np.column_stack([
+        G_centers.ravel(),
+        np.full_like(G_centers.ravel(), v_slice),
+        M_centers.ravel()
+    ]).astype(np.float32)
+
+    actions_map = np.zeros(query_pts.shape[0], dtype=np.float32)
+
+    # Batch inference
+    for i, pt in enumerate(query_pts):
         act, _ = get_optimal_action(pt, pi)
-        actions_map[i] = act
+        actions_map[i] = act[0] if isinstance(act, (np.ndarray, list)) else act
 
-        # Mathematical barycentric interpolation for the Value Function
-        lambdas, indices = get_barycentric_weights_and_indices(
-            np.atleast_2d(pt).astype(np.float32),
-            pi.bounds_low,
-            pi.bounds_high,
-            pi.grid_shape,
-            pi.strides,
-            pi.corner_bits,
-        )
-        values_map[i] = np.sum(lambdas.flatten() * pi.value_function[indices.flatten()])
+    # Reshape and transpose for matrix-to-axis alignment
+    C_L = actions_map.reshape(M_centers.shape).T
 
-    Actions = actions_map.reshape(G.shape)
-    Values = values_map.reshape(G.shape)
+    fig, ax = plt.subplots(figsize=(10, 4.5))
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-    # --- Plot 1: Value Function (turbo_r: Red=Negative/Loss, Blue=Zero/Safe) ---
-    c1 = ax1.contourf(np.rad2deg(G), V, Values, levels=50, cmap="turbo_r")
-    fig.colorbar(c1, ax=ax1, label="Value Function (Altitude Loss)")
-    ax1.set_title("Value Function \n(Red = High Altitude Loss, Blue = Safe)")
-    ax1.set_xlabel("Flight Path Angle γ (deg)")
-    ax1.set_ylabel("Airspeed Norm (V/Vs)")
-    ax1.grid(alpha=0.3)
-
-    # --- Plot 2: Optimal Policy ---
-    c2 = ax2.contourf(
-        np.rad2deg(G), V, Actions, levels=len(pi.action_space), cmap="coolwarm"
-    )
-    fig.colorbar(c2, ax=ax2, label="Action (Lift Coefficient - C_L)")
-    ax2.set_title("Optimal Policy (Decision Boundaries)")
-    ax2.set_xlabel("Flight Path Angle γ (deg)")
-    ax2.set_ylabel("Airspeed Norm (V/Vs)")
-    ax2.grid(alpha=0.3)
-
-    plt.tight_layout()
-
-    # Save the figure securely to disk
-    output_path = Path("img/policy_and_value.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"[*] Plot successfully saved to: {output_path.resolve()}")
-    plt.close()
-
-def simulate_and_plot_trajectories(
-    pi: PolicyIteration, initial_conditions: list
-) -> None:
-    """Simulate and plot kinematic behavior for different initial states."""
-    print(f"[*] Simulating {len(initial_conditions)} trajectories...")
-
-    glider = ReducedSymmetricGliderPullout()
-    fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
-    colors = ["b", "r", "g", "m", "c"]
-
-    for idx, init_state in enumerate(initial_conditions):
-        state = np.array(init_state, dtype=np.float32)
-
-        # Vectorized environment configuration
-        glider.state = np.atleast_2d(state)
-        glider.airplane.flight_path_angle = state[0]
-        glider.airplane.airspeed_norm = state[1]
-
-        trajectory = {"gamma": [], "vnorm": [], "cl": [], "alt_loss": []}
-        altitude_loss = 0.0
-        done = False
-        steps = 0
-
-        # Simulation loop
-        while not done and steps < 1000:
-            current_state = glider.state[0].copy()
-
-            # Boundary check bypassing heavy triangulation
-            if np.any(current_state < pi.bounds_low) or np.any(
-                current_state > pi.bounds_high
-            ):
-                print(f"  -> Trajectory {idx+1} went out of bounds at step {steps}.")
-                break
-
-            # Extract scalar optimal action
-            action, _ = get_optimal_action(current_state, pi)
-
-            trajectory["gamma"].append(np.rad2deg(current_state[0]))
-            trajectory["vnorm"].append(current_state[1])
-            trajectory["cl"].append(action)
-            trajectory["alt_loss"].append(altitude_loss)
-
-            # Environment step
-            next_state_batch, reward_batch, done_batch, _, _ = glider.step(action)
-
-            reward = reward_batch[0]
-            done = bool(done_batch[0])
-
-            # Reward is (dt * V * sin(gamma) * Vs) which translates to delta altitude
-            altitude_loss -= reward
-
-            glider.state = next_state_batch
-            steps += 1
-
-        print(
-            f"  -> Trajectory {idx+1}: {steps} steps | "
-            f"Altitude lost: {altitude_loss:.2f} m"
-        )
-
-        color = colors[idx % len(colors)]
-        label = f"γ0={np.rad2deg(init_state[0]):.1f}°, V0={init_state[1]:.1f}"
-
-        axs[0].plot(trajectory["gamma"], label=label, color=color, linewidth=2)
-        axs[0].plot(trajectory["vnorm"], linestyle="--", color=color, alpha=0.7)
-        axs[1].plot(trajectory["cl"], label=label, color=color, linewidth=2)
-        axs[2].plot(trajectory["alt_loss"], label=label, color=color, linewidth=2)
-
-    axs[0].set_title("Kinematic States (Solid: γ [deg] | Dashed: Normalized Speed)")
-    axs[0].set_ylabel("State")
-    axs[0].legend()
-    axs[0].grid(True, alpha=0.5)
-
-    axs[1].set_title("Control Action ($C_L$)")
-    axs[1].set_ylabel("Lift Coefficient")
-    axs[1].grid(True, alpha=0.5)
-
-    axs[2].set_title("Cumulative Altitude Loss")
-    axs[2].set_xlabel("Time (Steps)")
-    axs[2].set_ylabel("Altitude Lost [m]")
-    axs[2].grid(True, alpha=0.5)
-
-    plt.tight_layout()
-
-    # Save the figure securely to disk
-    output_path = Path("img/trajectories.png")
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"[*] Plot successfully saved to: {output_path.resolve()}")
-    plt.close()
-
-def get_parula_cmap() -> LinearSegmentedColormap:
-    """
-    Create a highly accurate approximation of MATLAB's proprietary parula colormap.
-
-    This is used for scientific publication matching.
-    """
-    # Key anchor RGB values mapped from the original parula scale
-    parula_anchors = [
-        (0.2081, 0.1663, 0.5292),  # Deep blue
-        (0.0165, 0.4266, 0.8786),  # Blue-cyan
-        (0.0384, 0.6743, 0.7436),  # Cyan-green
-        (0.4420, 0.7481, 0.5033),  # Green
-        (0.8185, 0.7327, 0.3498),  # Yellow-green
-        (0.9990, 0.7653, 0.2384),  # Yellow-orange
-        (0.9769, 0.9839, 0.0805),  # Bright yellow
-    ]
-    return LinearSegmentedColormap.from_list("parula_approx", parula_anchors)
-
-def plot_altitude_loss_heatmap(
-    pi: Any,
-    glider_env: Any,
-    v_min: float = 0.9,
-    v_max: float = 4.0,
-    v_steps: int = 60,
-    gamma_min_deg: float = -90.0,
-    gamma_max_deg: float = -1.0,
-    gamma_steps: int = 45,
-    max_loss_plot: float = 180.0,
-    output_dir: str = "img",
-    filename: str = "altitude_loss_heatmap_kinematic.png",
-) -> None:
-    """
-    Generate a clean, professional heatmap for stall recovery research.
-
-    Filters boundary artifacts and uses a custom MATLAB-style colormap.
-    """
-    logger.info("Starting high-fidelity kinematic simulation...")
-
-    v_vals = np.linspace(v_min, v_max, v_steps)
-    g_vals = np.linspace(
-        np.deg2rad(gamma_min_deg), np.deg2rad(gamma_max_deg), gamma_steps
-    )
-    loss_matrix = np.zeros((gamma_steps, v_steps), dtype=np.float32)
-
-    for i, gamma_init in enumerate(g_vals):
-        for j, v_init in enumerate(v_vals):
-
-            # Handle near-zero boundary safely
-            if gamma_init == 0.0:
-                gamma_init = 0.1
-
-            state = np.array([gamma_init, v_init], dtype=np.float32)
-            glider_env.state = np.atleast_2d(state)
-            glider_env.airplane.flight_path_angle = gamma_init
-            glider_env.airplane.airspeed_norm = v_init
-
-            total_loss = 0.0
-            done = False
-            step_count = 0
-
-            # SIMULATION LOOP
-            while not done and step_count < 1500:
-                curr_s = glider_env.state[0].copy()
-
-                if np.any(curr_s < pi.bounds_low) or np.any(curr_s > pi.bounds_high):
-                    break
-
-                action, _ = get_optimal_action(curr_s, pi)
-                next_s, reward, done_batch, _, _ = glider_env.step(action)
-
-                total_loss -= reward[0]
-                glider_env.state = next_s
-                done = bool(done_batch[0])
-                step_count += 1
-
-            # POST-PROCESS: Artifact correction
-            if total_loss < 1.0 and gamma_init < np.deg2rad(-1.0):
-                loss_matrix[i, j] = loss_matrix[i - 1, j] if i > 0 else 0.0
-            else:
-                loss_matrix[i, j] = total_loss
-
-    # 3. Visualization Engine (Strict Paper Style)
-    logger.info("Generating heatmap with custom Parula colormap...")
-    v_grid, g_grid = np.meshgrid(v_vals, np.rad2deg(g_vals))
-
-    fig, ax = plt.subplots(figsize=(10, 6))
-
+    # Render discrete mesh using defined edge boundaries
     mesh = ax.pcolormesh(
-        v_grid,
-        g_grid,
-        loss_matrix,
-        cmap=get_parula_cmap(),  # Injected custom colormap
-        shading="auto",
-        vmin=0,
-        vmax=max_loss_plot,
-        edgecolors="k",
-        linewidth=0.1,
+        mu_edges, gamma_edges, C_L,
+        cmap="gray", edgecolors="k", linewidth=0.5,
+        vmin=-0.5, vmax=1.0
     )
 
-    ax.set_title(
-        "Minimum altitude loss as a function of initial conditions", fontweight="bold"
-    )
-    ax.set_xlabel("Initial Relative Airspeed ($V/V_s$)")
-    ax.set_ylabel("Initial Flight Path Angle (deg)")
+    # Typography matching
+    ax.set_title("Optimal policy for $C_L^*$", fontsize=16, pad=15)
+    ax.set_ylabel("Flight path angle (deg)", fontsize=14)
+    ax.set_xlabel("Bank angle (deg)", fontsize=14)
+    
+    ax.set_xlim([0, 180])
+    ax.set_ylim([-90, 0])
+    
+    ax.set_xticks(np.arange(0, 210, 30))
+    ax.set_yticks(np.arange(-90, 30, 30))
 
-    ax.set_xlim([v_min, v_max])
-    ax.set_ylim([gamma_min_deg, 0.0])
-
-    ax.set_xticks(np.arange(1, 4.5, 0.5))
-    ax.set_yticks(np.arange(-90, 10, 10))
-
-    cbar = fig.colorbar(mesh, ax=ax)
-    cbar.set_label("Altitude Loss [m]")
+    # Center-aligned text annotations with LaTeX rendering
+    bbox_props = dict(boxstyle="square,pad=0.3", fc="white", ec="black", lw=1)
+    
+    ax.text(45, -45, "$C_L^* = 1.0$", ha="center", va="center", bbox=bbox_props, fontsize=12)
+    ax.text(135, -30, "$C_L^* = -0.5$", ha="center", va="center", bbox=bbox_props, fontsize=12)
+    
+    ax.text(183, -45, f"V/V$_s$ = {v_slice}", va="center", fontsize=14)
 
     plt.tight_layout()
+    
+    output_path = Path(f"img/{prefix}_paper_policy_slice_V_{v_slice}.png")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    logger.info(f"[*] Plot successfully saved to {output_path.resolve()}")
 
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-    file_path = out_path / filename
+# =====================================================================
+# PIPELINE EXECUTION
+# =====================================================================
 
-    fig.savefig(file_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-    logger.info(f"Heatmap successfully saved to: {file_path.resolve()}")
+def run_pipeline(setup_func: Any, prefix: str) -> None:
+    """Execute training and analytics with injected configurations."""
+    env, states, actions, config = setup_func()
+    pi = train_or_load_policy(env, states, actions, config, prefix)
+    
+    if pi.n_dims == 3:
+        plot_paper_style_policy_slice(pi, prefix, v_slice=1.2)
 
 if __name__ == "__main__":
-    # 1. Train or load the optimal policy
-    pi = train_or_load_policy("ReducedSymmetricGliderPullout_policy.pkl")
-
-    # 2. Plot the topological maps (Value Function and Policy)
-    plot_policy_and_value(pi)
-
-    # 3. Simulate critical scenarios
-    initial_conditions = [
-        [np.deg2rad(-15), 0.8],  # Mild dive
-        [np.deg2rad(-45), 1.5],  # Moderate dive, high speed
-        [np.deg2rad(-90), 0.8],  # Vertical dive, low speed
-    ]
-
-    simulate_and_plot_trajectories(pi, initial_conditions)
-    
-    # 4. Generate the MATLAB-style plot
-    plot_altitude_loss_heatmap(pi, ReducedSymmetricGliderPullout())
+    run_pipeline(setup_banked_glider_experiment, "banked_glider")

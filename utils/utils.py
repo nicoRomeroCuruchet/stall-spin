@@ -95,7 +95,6 @@ def evaluate_policy_step(
 
             new_val[s] = v_s
 
-
 def get_optimal_action(state: np.ndarray, optimal_policy: any) -> tuple:
     """Approximate the optimal action for a given state using interpolation."""
     # Convert state to required format
@@ -128,7 +127,6 @@ def get_optimal_action(state: np.ndarray, optimal_policy: any) -> tuple:
     optimal_action = optimal_policy.action_space[best_action_idx]
 
     return optimal_action, probabilities
-
 
 # =====================================================================
 # Visualization and Utility Functions

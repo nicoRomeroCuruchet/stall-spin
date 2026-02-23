@@ -1,123 +1,125 @@
 import numpy as np
-import gymnasium
 from gymnasium import spaces
-from matplotlib import pyplot as plt
-from airplane.reduced_grumman import ReducedGrumman
+
 from airplane.airplane_env import AirplaneEnv
+from airplane.reduced_grumman import ReducedGrumman
 
 
 class ReducedBankedGliderPullout(AirplaneEnv):
+    """
+    Environment for the asymmetric (banked) glider pullout maneuver.
+    State Space: 3D (Flight Path Angle, Airspeed, Bank Angle).
+    Action Space: 2D (Lift Coefficient, Bank Rate).
+    """
 
     def __init__(self, render_mode=None):
-
         self.airplane = ReducedGrumman()
-        super().__init__(self.airplane)
+        super().__init__(self.airplane, render_mode=render_mode)
         
         # Observation space: Flight Path Angle (γ), Air Speed (V), Bank Angle (μ)
-        self.observation_space = spaces.Box(np.array([np.deg2rad(-180), 0.7, np.deg2rad(-20)], np.float32), 
-                                            np.array([np.deg2rad(00), 4.0, np.deg2rad(200)], np.float32), shape=(3,), dtype=np.float32) 
+        low_obs = np.array([np.deg2rad(-180), 0.7, np.deg2rad(-180)], dtype=np.float32)
+        high_obs = np.array([0.0, 4.0, np.deg2rad(180)], dtype=np.float32)
+        
+        self.observation_space = spaces.Box(
+            low=low_obs, high=high_obs, shape=(3,), dtype=np.float32
+        )
+        
         # Action space: Lift Coefficient (CL), Bank Rate (μ')
-        self.action_space = spaces.Box(np.array([-0.5, np.deg2rad(-30)], np.float32), np.array([1.0, np.deg2rad(30)], np.float32), shape=(2,), dtype=np.float32)
+        low_action = np.array([-0.5, np.deg2rad(-30)], dtype=np.float32)
+        high_action = np.array([1.0, np.deg2rad(30)], dtype=np.float32)
+        
+        self.action_space = spaces.Box(
+            low=low_action, high=high_action, shape=(2,), dtype=np.float32
+        )
 
-        self.state: np.ndarray | None = None
+        self.np_random = np.random.default_rng()
 
-    def _get_obs(self):
-        return np.vstack([self.airplane.flight_path_angle, 
-                          self.airplane.airspeed_norm, 
-                          self.airplane.bank_angle
-                          ], 
-                          dtype=np.float32).T
+    def _get_obs(self) -> np.ndarray:
+        """Retrieve the vectorized current observation."""
+        return np.vstack([
+            self.airplane.flight_path_angle, 
+            self.airplane.airspeed_norm, 
+            self.airplane.bank_angle
+        ], dtype=np.float32).T
 
-    def _get_info(self):
+    def _get_info(self) -> dict:
         return {}
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None) -> tuple[np.ndarray, dict]:
+        """Reset the environment to a uniformly sampled valid initial state."""
+        if seed is not None:
+            self.np_random = np.random.default_rng(seed)
 
-        # Choose the initial agent's state uniformly
-        [flight_path_angle, airspeed_norm, bank_angle] = np.random.uniform(self.observation_space.low, self.observation_space.high)
-        self.airplane.reset(flight_path_angle, airspeed_norm, bank_angle)
+        flight_path, airspeed, bank_angle = self.np_random.uniform(
+            self.observation_space.low, self.observation_space.high
+        )
+        self.airplane.reset(flight_path, airspeed, bank_angle)
 
-        observation = self._get_obs(), {}
+        observation = self._get_obs()
+        observation = np.clip(
+            observation, self.observation_space.low, self.observation_space.high
+        )
 
-        return observation
+        self.state = observation.copy()
+        return observation.flatten(), self._get_info()
 
-    def step(self, action: list):
+    def step(self, action: np.ndarray) -> tuple:
+        """Execute a vectorized integration step for the banked physics model."""
+        action_batch = np.atleast_2d(action)
+        
+        # Synchronize physics engine
+        self.airplane.flight_path_angle = self.state[:, 0].copy()
+        self.airplane.airspeed_norm = self.state[:, 1].copy()
+        self.airplane.bank_angle = self.state[:, 2].copy()
 
-        self.airplane.flight_path_angle  = self.state[:,0].copy()
-        self.airplane.airspeed_norm = self.state[:,1].copy()
-        self.airplane.bank_angle = self.state[:,2].copy()
-
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        c_lift, bank_rate = action[0], action[1]
+        action_clipped = np.clip(action_batch, self.action_space.low, self.action_space.high)
+        
+        c_lift = action_clipped[:, 0]
+        bank_rate = action_clipped[:, 1]
+        
         init_terminal, _ = self.terminal(self.state)
 
-        self.airplane.command_airplane(c_lift, bank_rate, 0)
-        # clip the state values to the observation space
-        #self.airplane.flight_path_angle = np.clip(self.airplane.flight_path_angle, self.observation_space.low[0], self.observation_space.high[0])
-        #self.airplane.airspeed_norm = np.clip(self.airplane.airspeed_norm, self.observation_space.low[1], self.observation_space.high[1])
-        #self.airplane.bank_angle = np.clip(self.airplane.bank_angle, self.observation_space.low[2], self.observation_space.high[2])
-        # Calculate step reward: Height Loss
-        # TODO: Analyze policy performance based on reward implementation.
-        reward = self.airplane.TIME_STEP * self.airplane.airspeed_norm * np.sin(self.airplane.flight_path_angle) #- 1e-3 * bank_rate ** 2 
-        #reward = self.airplane.TIME_STEP * self.airplane.airspeed_norm * np.sin(self.airplane.flight_path_angle)*self.airplane.STALL_AIRSPEED
-        terminated, _ = self.terminal(np.vstack([self.airplane.flight_path_angle, 
-                                                 self.airplane.airspeed_norm, 
-                                                 self.airplane.bank_angle
-                                                 ], dtype=np.float32).T) 
-        
+        # Propagate dynamics (Thrust = 0 for glider)
+        self.airplane.command_airplane(c_lift, bank_rate, 0.0)
+
+        # Reward: Minimize altitude loss
+        reward = (
+            self.airplane.TIME_STEP 
+            * self.airplane.airspeed_norm 
+            * np.sin(self.airplane.flight_path_angle) 
+            * self.airplane.STALL_AIRSPEED
+        )
+
+        obs = self._get_obs()
+        terminated, _ = self.terminal(obs) 
         terminated |= init_terminal
-        reward = np.where(init_terminal, 0, reward)
-        return self._get_obs(), reward, terminated, False, self._get_info()
+        
+        reward = np.where(init_terminal, 0.0, reward)
+        self.state = obs.copy()
+
+        # Handle Gym API compatibility for single-vector input
+        if self.state.shape[0] == 1:
+            return obs.flatten(), float(reward[0]), bool(terminated[0]), False, self._get_info()
+            
+        return obs, reward, terminated, False, self._get_info()
     
+    def terminal(self, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Evaluate terminal conditions enforcing 3D boundaries."""
+        gamma = state[:, 0]
+        v_norm = state[:, 1]
+        mu = state[:, 2]
 
-    def one_step(self, action: list):
+        v_max = self.observation_space.high[1]
+        mu_max = self.observation_space.high[2]
 
-        self.airplane.flight_path_angle  = self.state[0].copy()
-        self.airplane.airspeed_norm = self.state[1].copy()
-        self.airplane.bank_angle = self.state[2].copy()
-
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        c_lift, bank_rate = action[0], action[1]
-        init_terminal, _ = self.terminal_step(self.state)
-
-        self.airplane.command_airplane(c_lift, bank_rate, 0)
-        # clip the state values to the observation space
-        #self.airplane.flight_path_angle = np.clip(self.airplane.flight_path_angle, self.observation_space.low[0], self.observation_space.high[0])
-        #self.airplane.airspeed_norm = np.clip(self.airplane.airspeed_norm, self.observation_space.low[1], self.observation_space.high[1])
-        #self.airplane.bank_angle = np.clip(self.airplane.bank_angle, self.observation_space.low[2], self.observation_space.high[2])
-
-        # Calculate step reward: Height Loss
-        # TODO: Analyze policy performance based on reward implementation.
-        reward = self.airplane.TIME_STEP * self.airplane.airspeed_norm * np.sin(self.airplane.flight_path_angle) - 1e-3 * bank_rate ** 2 
-        #reward = self.airplane.TIME_STEP * self.airplane.airspeed_norm * np.sin(self.airplane.flight_path_angle)*self.airplane.STALL_AIRSPEED
-
-        terminated, _ = self.terminal_step(np.vstack([self.airplane.flight_path_angle, 
-                                                 self.airplane.airspeed_norm, 
-                                                 self.airplane.bank_angle], dtype=np.float32).T) 
+        is_terminal = (
+            ((gamma >= 0.0) & (v_norm >= 1.0))         # Success
+            | (gamma <= -np.pi)                        # Vertical dive crash
+            | (v_norm > v_max)                         # Overspeed limit
+            | (np.abs(mu) >= mu_max)                   # Over-bank failure
+        )
         
-        terminated |= init_terminal
-        reward = np.where(init_terminal, 0, reward)
-        return self._get_obs(), reward, terminated, False, self._get_info()
+        terminate = is_terminal.astype(np.bool_)
+        terminal_rewards = np.zeros_like(terminate, dtype=np.float32)
 
-
-    def terminal_step(self, state: np.ndarray):
-        state = state.squeeze()
-        flight_path_angle = state[0]
-        airspeed_norm = state[1]
-        terminate = np.where((flight_path_angle >= np.deg2rad(0)) &\
-                             #  (flight_path_angle <= np.deg2rad(-180))) &\
-                                  (airspeed_norm >= 1) , True, False)
-        return terminate, 0
-
-    def terminal(self, state: np.ndarray):
-        flight_path_angle = state[:,0]
-        airspeed_norm = state[:,1]
-        #terminate = np.where(((flight_path_angle >= np.deg2rad(0)) |\
-        #                       (flight_path_angle <= np.deg2rad(-180))) &\
-        #                          (airspeed_norm >= 1) , True, False)
-        #terminate = np.where((flight_path_angle >= np.deg2rad(0)) &\
-                             #  (flight_path_angle <= np.deg2rad(-180))) &\
-        #                          (airspeed_norm >= 1) , True, False)
-        
-        terminate =  np.where((flight_path_angle >= 0.0) & (airspeed_norm >= 1) , True, False)
-        return terminate, 0
+        return terminate, terminal_rewards
