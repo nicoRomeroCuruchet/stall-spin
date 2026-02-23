@@ -57,7 +57,7 @@ def train_or_load_policy(file_name: str = "ReducedSymmetricGliderPullout_policy.
     pi = PolicyIteration(
         env=glider, 
         states_space=states_space,
-        action_space=np.linspace(-0.5, 1.0, 8, dtype=np.float32),
+        action_space=np.linspace(-0.5, 1.0, 20, dtype=np.float32),
         config=custom_config
     )
 
@@ -204,14 +204,46 @@ def simulate_and_plot_trajectories(pi: PolicyIteration, initial_conditions: list
     print(f"[*] Plot successfully saved to: {output_path.resolve()}")
     plt.close()
 
+
+
+import logging
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
+
+# Internal project imports
+from utils.utils import get_optimal_action
+
+logger = logging.getLogger(__name__)
+
+def get_parula_cmap() -> LinearSegmentedColormap:
+    """
+    Creates a highly accurate approximation of MATLAB's proprietary 
+    parula colormap for scientific publication matching.
+    """
+    # Key anchor RGB values mapped from the original parula scale
+    parula_anchors = [
+        (0.2081, 0.1663, 0.5292),  # Deep blue
+        (0.0165, 0.4266, 0.8786),  # Blue-cyan
+        (0.0384, 0.6743, 0.7436),  # Cyan-green
+        (0.4420, 0.7481, 0.5033),  # Green
+        (0.8185, 0.7327, 0.3498),  # Yellow-green
+        (0.9990, 0.7653, 0.2384),  # Yellow-orange
+        (0.9769, 0.9839, 0.0805)   # Bright yellow
+    ]
+    return LinearSegmentedColormap.from_list("parula_approx", parula_anchors)
+
 def plot_altitude_loss_heatmap(
     pi: Any, 
-    glider_env: Any = ReducedSymmetricGliderPullout(),
+    glider_env: Any,
     v_min: float = 0.9,
     v_max: float = 4.0,
-    v_steps: int = 60,      # Aumentamos resolución para suavizar
+    v_steps: int = 60,
     gamma_min_deg: float = -90.0,
-    gamma_max_deg: float = -1, # FIX: Evita la zona de terminación instantánea
+    gamma_max_deg: float = -1.0, 
     gamma_steps: int = 45,
     max_loss_plot: float = 180.0, 
     output_dir: str = "img",
@@ -219,7 +251,7 @@ def plot_altitude_loss_heatmap(
 ) -> None:
     """
     Generates a clean, professional heatmap for stall recovery research.
-    Filters boundary artifacts and uses high-fidelity rendering.
+    Filters boundary artifacts and uses a custom MATLAB-style colormap.
     """
     logger.info("Starting high-fidelity kinematic simulation...")
     
@@ -229,8 +261,11 @@ def plot_altitude_loss_heatmap(
 
     for i, gamma_init in enumerate(g_vals):
         for j, v_init in enumerate(v_vals):
-            # Reset Environment
-            if gamma_init == 0: gamma_init = 0.1
+            
+            # Handle near-zero boundary safely
+            if gamma_init == 0.0: 
+                gamma_init = 0.1
+                
             state = np.array([gamma_init, v_init], dtype=np.float32)
             glider_env.state = np.atleast_2d(state)
             glider_env.airplane.flight_path_angle = gamma_init
@@ -244,7 +279,6 @@ def plot_altitude_loss_heatmap(
             while not done and step_count < 1500:
                 curr_s = glider_env.state[0].copy()
                 
-                # Boundary safety check
                 if np.any(curr_s < pi.bounds_low) or np.any(curr_s > pi.bounds_high):
                     break
                 
@@ -256,24 +290,23 @@ def plot_altitude_loss_heatmap(
                 done = bool(done_batch[0])
                 step_count += 1
             
-            # POST-PROCESS: Si la pérdida es insignificante (< 1m) en una zona 
-            # de alta exigencia, es un artefacto. Lo corregimos con el valor vecino.
+            # POST-PROCESS: Artifact correction
             if total_loss < 1.0 and gamma_init < np.deg2rad(-1.0):
-                 loss_matrix[i, j] = loss_matrix[i-1, j] if i > 0 else 0
+                 loss_matrix[i, j] = loss_matrix[i-1, j] if i > 0 else 0.0
             else:
                 loss_matrix[i, j] = total_loss
 
-    # GRAPHICS ENGINE
     # 3. Visualization Engine (Strict Paper Style)
-    logger.info("Generating zero-margin heatmap for paper replica...")
+    logger.info("Generating heatmap with custom Parula colormap...")
     v_grid, g_grid = np.meshgrid(v_vals, np.rad2deg(g_vals))
     
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Use shading='flat' or 'nearest' to ensure cell-to-pixel alignment
     mesh = ax.pcolormesh(
-        v_grid, g_grid, loss_matrix, 
-        cmap='turbo', 
+        v_grid, 
+        g_grid, 
+        loss_matrix, 
+        cmap=get_parula_cmap(),  # Injected custom colormap
         shading='auto',
         vmin=0, 
         vmax=max_loss_plot,
@@ -281,30 +314,29 @@ def plot_altitude_loss_heatmap(
         linewidth=0.1
     )
 
-    # TITLES AND LABELS
     ax.set_title("Minimum altitude loss as a function of initial conditions", fontweight='bold')
     ax.set_xlabel("Initial Relative Airspeed ($V/V_s$)")
     ax.set_ylabel("Initial Flight Path Angle (deg)")
 
-    # FIX: Strict limit enforcement to remove the 4.2 padding
     ax.set_xlim([v_min, v_max]) 
     ax.set_ylim([gamma_min_deg, 0.0])
 
-    # OPTIONAL: Force specific ticks to match the paper's intervals
     ax.set_xticks(np.arange(1, 4.5, 0.5))
     ax.set_yticks(np.arange(-90, 10, 10))
 
-    # Add colorbar
     cbar = fig.colorbar(mesh, ax=ax)
     cbar.set_label('Altitude Loss [m]')
 
     plt.tight_layout()
     
-    # Save with high-fidelity resolution
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path / filename, dpi=300, bbox_inches='tight')
+    file_path = out_path / filename
+    
+    fig.savefig(file_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
+    
+    logger.info(f"Heatmap successfully saved to: {file_path.resolve()}")
 
 if __name__ == "__main__":
     # 1. Train or load the optimal policy
@@ -321,7 +353,5 @@ if __name__ == "__main__":
     ]
     
     simulate_and_plot_trajectories(pi, initial_conditions)
-
     #4. Generar el gráfico estilo MATLAB
-    plot_altitude_loss_heatmap(pi)
-    
+    plot_altitude_loss_heatmap(pi, ReducedSymmetricGliderPullout())
