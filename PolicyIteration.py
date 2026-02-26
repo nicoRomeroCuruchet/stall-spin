@@ -15,6 +15,18 @@ except ImportError:
     GPU_AVAILABLE = False
 
 
+# Fused Reduction Kernel: Computes max(abs(A - B)) with 0 bytes of auxiliary VRAM allocation
+max_abs_diff_kernel = cp.ReductionKernel(
+    in_params='float32 x, float32 y',
+    out_params='float32 z',
+    map_expr='abs(x - y)',
+    reduce_expr='max(a, b)',
+    post_map_expr='z = a',
+    identity='0.0f',
+    name='max_abs_diff'
+)
+
+
 @dataclass
 class PolicyIterationConfig:
     """
@@ -301,14 +313,20 @@ class PolicyIteration:
         self.blocks_per_grid = (self.n_states + self.threads_per_block - 1) // self.threads_per_block
 
     def _pull_tensors_from_gpu(self) -> None:
-        """Retrieves converged policy to CPU RAM and reconstructs external One-Hot API."""
+        """
+        Retrieves converged policy to CPU RAM.
+        Memory Optimization:
+        Instead of allocating a massive dense One-Hot matrix (N_states x N_actions)
+        which causes an OOM exception (requiring ~67+ GB), we store the policy as a 
+        highly efficient 1D array of integers (N_states, ).
+        """
         logger.info("Retrieving converged matrices from VRAM to CPU RAM...")
         self.value_function = cp.asnumpy(self.d_value_function)
-        
-        # Reconstruct standard One-Hot policy matrix for external plotters
-        policy_indices = cp.asnumpy(self.d_policy)
-        self.policy = np.zeros((self.n_states, self.n_actions), dtype=np.float32)
-        self.policy[np.arange(self.n_states), policy_indices] = 1.0
+
+        # Retrieve the 1D optimal action indices directly.
+        # We deliberately avoid reconstructing the dense One-Hot matrix here
+        # to guarantee extreme memory efficiency and scalability.
+        self.policy = cp.asnumpy(self.d_policy)
 
     def policy_evaluation(self) -> float:
         """Executes purely procedural evaluation on GPU."""
@@ -326,7 +344,7 @@ class PolicyIteration:
                 )
             )
             
-            d_delta = cp.max(cp.abs(self.d_new_value_function - self.d_value_function))
+            d_delta = max_abs_diff_kernel(self.d_new_value_function, self.d_value_function)
             self.d_value_function, self.d_new_value_function = self.d_new_value_function, self.d_value_function
             
             if i % SYNC_INTERVAL == 0 or i == self.config.maximum_iterations - 1:

@@ -95,8 +95,15 @@ def evaluate_policy_step(
 
             new_val[s] = v_s
 
+
+
 def get_optimal_action(state: np.ndarray, optimal_policy: any) -> tuple:
-    """Approximate the optimal action for a given state using interpolation."""
+    """
+    Approximate the optimal action for a given state using barycentric interpolation.
+    
+    Dynamically constructs the local One-Hot policy matrix exclusively for the 
+    bounding vertices to prevent massive RAM overheads.
+    """
     # Convert state to required format
     state_2d = np.atleast_2d(state).astype(np.float32)
 
@@ -113,8 +120,17 @@ def get_optimal_action(state: np.ndarray, optimal_policy: any) -> tuple:
     lambdas = lambdas.flatten()
     flat_indices = points_indexes.flatten()
 
+    # OOM FIX: Retrieve the optimal action indices for the bounding corners
+    best_action_indices = optimal_policy.policy[flat_indices]
+    
+    # Dynamically allocate the local One-Hot matrix strictly for the 8 neighbors
+    n_neighbors = len(flat_indices)
+    relevant_policies = np.zeros(
+        (n_neighbors, optimal_policy.n_actions), dtype=np.float32
+    )
+    relevant_policies[np.arange(n_neighbors), best_action_indices] = 1.0
+
     # Vectorized Probability Calculation
-    relevant_policies = optimal_policy.policy[flat_indices]
     probabilities = lambdas @ relevant_policies
 
     if not np.isclose(np.sum(probabilities), 1.0, atol=1e-2):

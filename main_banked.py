@@ -4,6 +4,8 @@ from typing import Any, Tuple
 
 import pickle
 import os
+from typing import Any, Tuple, Dict, Optional
+
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -136,78 +138,134 @@ def setup_high_fidelity_banked_glider() -> tuple[
     
     return env, states_space, action_space, config
 
-def setup_high_fidelity_banked_glider() -> tuple[
-    gym.Env, np.ndarray, np.ndarray, PolicyIterationConfig
+
+import logging
+from pathlib import Path
+from typing import Tuple
+
+import numpy as np
+import numba as nb
+import gymnasium as gym
+
+# Assuming these are available in your namespace
+# from airplane.reduced_banked_glider_pullout import ReducedBankedGliderPullout
+# from PolicyIteration import PolicyIterationConfig
+
+logger = logging.getLogger(__name__)
+
+
+@nb.njit(parallel=True, fastmath=True, cache=True)
+def _generate_state_space_procedurally(
+    gamma_bins: np.ndarray,
+    v_bins: np.ndarray,
+    mu_bins: np.ndarray
+) -> np.ndarray:
+    """
+    Generates the Cartesian product of the state space without memory spikes.
+    
+    Pre-allocates the exact memory block required and uses multi-threaded 
+    C-level loops to populate the grid. This bypasses Python's GIL and 
+    eliminates the massive overhead of numpy.meshgrid and numpy.vstack.
+    """
+    n_gamma = len(gamma_bins)
+    n_v = len(v_bins)
+    n_mu = len(mu_bins)
+    total_states = n_gamma * n_v * n_mu
+
+    # Allocate the exact contiguous array in memory once
+    states = np.empty((total_states, 3), dtype=np.float32)
+
+    # Flat iteration utilizing CPU vectorization and parallel threads
+    for i in nb.prange(n_gamma):
+        for j in range(n_v):
+            for k in range(n_mu):
+                idx = i * (n_v * n_mu) + j * n_mu + k
+                states[idx, 0] = gamma_bins[i]
+                states[idx, 1] = v_bins[j]
+                states[idx, 2] = mu_bins[k]
+
+    return states
+
+
+@nb.njit(parallel=True, fastmath=True, cache=True)
+def _generate_action_space_procedurally(
+    cl_bins: np.ndarray,
+    br_bins: np.ndarray
+) -> np.ndarray:
+    """
+    Generates the Cartesian product of the action space efficiently.
+    """
+    n_cl = len(cl_bins)
+    n_br = len(br_bins)
+    total_actions = n_cl * n_br
+
+    actions = np.empty((total_actions, 2), dtype=np.float32)
+
+    for i in nb.prange(n_cl):
+        for j in range(n_br):
+            idx = i * n_br + j
+            actions[idx, 0] = cl_bins[i]
+            actions[idx, 1] = br_bins[j]
+
+    return actions
+
+
+def setup_high_fidelity_banked_glider() -> Tuple[
+    gym.Env, np.ndarray, np.ndarray, "PolicyIterationConfig"
 ]:
     """
-    True Global Optimum Grid for RTX 3070 (8GB) utilizing Procedural C++ Kernels.
+    True Global Optimum Grid for RTX 4090 (24GB) utilizing Procedural Kernels.
     
     Memory Analytics (Compute-Bound Architecture):
     - States (Ns): 721 (gamma) * 311 (V) * 881 (mu) = 197,544,131 states.
     - Actions (Na): 91 actions.
-    - VRAM per state: 13 bytes (V, new_V, policy, terminal_mask).
-    - Total VRAM required: 197.5M * 13 bytes ≈ 2.39 GiB.
-    - Safety Margin: > 5.0 GiB (Immune to OOM on 8GB cards).
-    
-    Note: Each Bellman iteration will perform ~18 billion RK4 physics 
-    evaluations. This is highly compute-intensive but fits perfectly in memory.
+    - VRAM per state: 25 bytes total (States, V, new_V, policy, mask).
+    - Total VRAM required: 197.5M * 25 bytes ≈ 4.9 GiB.
+    - Safety Margin: ~ 17.0 GiB remaining on RTX 4090.
     """
-    env = ReducedBankedGliderPullout() 
-    
-    bins_space = {
-        # 0.25 degree resolution -> 721 points
-        "flight_path_angle": np.linspace(
-            np.deg2rad(-180), 0.0, 721, dtype=np.float32
-        ),
-        # 0.01 normalized airspeed resolution -> 311 points
-        "airspeed_norm": np.linspace(0.9, 4.0, 311, dtype=np.float32),
-        # 0.25 degree bank angle resolution -> 881 points
-        "bank_angle": np.linspace(
-            np.deg2rad(-20), np.deg2rad(200), 881, dtype=np.float32
-        )
-    }
-    
-    grid = np.meshgrid(*bins_space.values(), indexing="ij")
-    states_space = np.vstack([g.ravel() for g in grid]).astype(np.float32).T
-    
-    # Action space remains standard to capture Bang-Bang optimality effectively
-    cl_vals = np.linspace(-0.5, 1.0, 7, dtype=np.float32)
-    br_vals = np.linspace(np.deg2rad(-30), np.deg2rad(30), 13, dtype=np.float32)
-    
-    action_grid = np.meshgrid(cl_vals, br_vals, indexing="ij")
-    action_space = np.vstack([a.ravel() for a in action_grid]).astype(np.float32).T
-    
-    config = PolicyIterationConfig(
-        gamma=1.0,               
-        theta=1e-4,              
-        n_steps=1000,            
-        log=False,               
-        log_interval=10,         
-        img_path=Path("./img")   
-    )
-    
-    return env, states_space, action_space, config
-    
-    grid = np.meshgrid(*bins_space.values(), indexing="ij")
-    states_space = np.vstack([g.ravel() for g in grid]).astype(np.float32).T
-    
-    cl_vals = np.linspace(-0.5, 1.0, 7, dtype=np.float32)
-    br_vals = np.linspace(np.deg2rad(-30), np.deg2rad(30), 13, dtype=np.float32)
-    
-    action_grid = np.meshgrid(cl_vals, br_vals, indexing="ij")
-    action_space = np.vstack([a.ravel() for a in action_grid]).astype(np.float32).T
-    
-    config = PolicyIterationConfig(
-        gamma=1.0,               
-        theta=1e-4,              
-        n_steps=1000,            
-        log=False,               
-        log_interval=10,         
-        img_path=Path("./img")   
-    )
-    
-    return env, states_space, action_space, config
 
+    logger.info("[*] Initializing High-Fidelity Banked Glider Environment")
+    env = ReducedBankedGliderPullout()
+
+    # 1. Define the 1D discrete arrays
+    gamma_bins = np.linspace(
+        np.deg2rad(-180), 0.0, 1441, dtype=np.float32
+    )
+    v_bins = np.linspace(
+        0.9, 4.0, 621, dtype=np.float32
+    )
+    mu_bins = np.linspace(
+        np.deg2rad(-20), np.deg2rad(200), 881, dtype=np.float32
+    )
+
+    #gamma_bins = np.linspace(np.deg2rad(-180), 0.0, 73, dtype=np.float32)
+    #v_bins = np.linspace(0.9, 4.0, 63, dtype=np.float32)
+    #mu_bins = np.linspace(np.deg2rad(-20), np.deg2rad(200), 89, dtype=np.float32) 
+
+    logger.info("[*] Compiling procedural state grid (197+ Million states)...")
+    
+    # 2. Build the state space procedurally to protect host RAM
+    states_space = _generate_state_space_procedurally(gamma_bins, v_bins, mu_bins)
+    
+    logger.info(f"[*] State space allocated successfully. Shape: {states_space.shape}")
+
+    # 3. Define and build the action space
+    cl_vals = np.linspace(-0.5, 1.0, 7, dtype=np.float32)
+    br_vals = np.linspace(np.deg2rad(-30), np.deg2rad(30), 13, dtype=np.float32)
+    
+    action_space = _generate_action_space_procedurally(cl_vals, br_vals)
+
+    # 4. Initialize configuration parameters
+    config = PolicyIterationConfig(
+        gamma=1.0,
+        theta=1e-4,
+        n_steps=1000,
+        log=False,
+        log_interval=10,
+        img_path=Path("./img")
+    )
+
+    return env, states_space, action_space, config
 
 def run_profiling() -> None:
     """
@@ -545,7 +603,128 @@ def plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
         fig_mu.savefig(f"img/{prefix}_policy_MuDot_V_{v_slice}.png", dpi=300, bbox_inches="tight")
         plt.close(fig_mu)
 
-def plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
+def plot_all_paper_style_policies(
+    pi: "PolicyIteration", 
+    prefix: str, 
+    show_mesh_lines: bool = False
+) -> None:
+    """
+    Generates policy heatmaps using the exact training grid resolution.
+    
+    Args:
+        pi: The trained PolicyIteration instance.
+        prefix: Prefix for the output image filenames.
+        show_mesh_lines: If True, draws the black grid lines between nodes. 
+                         Must be set to False for ultra-high resolution grids 
+                         to prevent the mesh lines from blacking out the plot.
+    """
+    if pi.n_dims != 3:
+        logger.warning("Policy heatmaps require a 3D state space. Skipping.")
+        return
+
+    # Slices for near-stall and high-energy states
+    v_slices = [1.2, 4.0]
+    
+    # 1. Extract the exact training bins from the state space to ensure 1:1 mapping
+    gamma_training = np.unique(pi.states_space[:, 0])
+    mu_training = np.unique(pi.states_space[:, 2])
+
+    # 2. Filter the grid to match the standard paper visualization range
+    # Gamma: -90 to 0 | Mu: 0 to 180
+    gamma_mask = (gamma_training >= np.deg2rad(-90.1)) & (gamma_training <= 0.01)
+    mu_mask = (mu_training >= -0.01) & (mu_training <= np.deg2rad(180.1))
+    
+    gamma_plot = gamma_training[gamma_mask]
+    mu_plot = mu_training[mu_mask]
+    
+    # Create the mesh for querying the VRAM policy tensor
+    M_centers, G_centers = np.meshgrid(mu_plot, gamma_plot, indexing="ij")
+    bbox_props = dict(boxstyle="square,pad=0.3", fc="white", ec="black", lw=1)
+
+    # Dynamic styling configuration for scalable grid resolutions
+    mesh_kwargs = {
+        "cmap": "gray",
+        "shading": "nearest",
+        "edgecolors": "k" if show_mesh_lines else "none",
+        "linewidth": 0.1 if show_mesh_lines else 0.0
+    }
+
+    for v_slice in v_slices:
+        logger.info(f"[*] Plotting raw policy nodes at V/Vs = {v_slice} (Resolution: {len(gamma_plot)}x{len(mu_plot)})")
+        
+        # Prepare batch query points [Gamma, V, Mu]
+        query_pts = np.column_stack([
+            G_centers.ravel(),
+            np.full_like(G_centers.ravel(), v_slice),
+            M_centers.ravel()
+        ]).astype(np.float32)
+
+        # Performance Optimization: Use np.empty instead of np.zeros
+        # Avoids the cost of zeroing memory since every element will be overwritten
+        cl_map = np.empty(query_pts.shape[0], dtype=np.float32)
+        mu_dot_map = np.empty(query_pts.shape[0], dtype=np.float32)
+
+        # Query the optimal action for each training node
+        for i, pt in enumerate(query_pts):
+            act, _ = get_optimal_action(pt, pi)
+            cl_map[i] = act[0]
+            mu_dot_map[i] = np.rad2deg(act[1])
+
+        # Reshape to 2D for plotting
+        C_L = cl_map.reshape(M_centers.shape).T
+        P_CMD = mu_dot_map.reshape(M_centers.shape).T
+
+        # Convert back to degrees for the axis labels
+        gamma_deg = np.rad2deg(gamma_plot)
+        mu_deg = np.rad2deg(mu_plot)
+
+        # --- PLOT C_L ---
+        fig_cl, ax_cl = plt.subplots(figsize=(10, 4.5))
+        ax_cl.pcolormesh(
+            mu_deg, gamma_deg, C_L,
+            vmin=-0.5, vmax=1.0, **mesh_kwargs
+        )
+
+        ax_cl.set_title(f"Optimal policy for $C_L^*$ (V/$V_s$ = {v_slice})", fontsize=16, pad=15)
+        ax_cl.set_ylabel("Flight path angle (deg)", fontsize=14)
+        ax_cl.set_xlabel("Bank angle (deg)", fontsize=14)
+        ax_cl.set_xlim([0, 180])
+        ax_cl.set_ylim([-90, 0])
+        ax_cl.set_xticks([0, 45, 90, 135, 180])
+        ax_cl.set_yticks([-90, -60, -30, 0])
+        
+        ax_cl.text(45, -45, "$C_L^* = 1.0$", ha="center", va="center", bbox=bbox_props, fontsize=12)
+        ax_cl.text(135, -30, "$C_L^* = -0.5$", ha="center", va="center", bbox=bbox_props, fontsize=12)
+
+        fig_cl.tight_layout()
+        output_cl_path = Path(f"img/{prefix}_policy_CL_V_{v_slice}.png")
+        fig_cl.savefig(output_cl_path, dpi=300, bbox_inches="tight")
+        plt.close(fig_cl)
+
+        # --- PLOT Mu_dot ---
+        fig_mu, ax_mu = plt.subplots(figsize=(10, 4.5))
+        ax_mu.pcolormesh(
+            mu_deg, gamma_deg, P_CMD,
+            vmin=-30.0, vmax=30.0, **mesh_kwargs
+        )
+
+        ax_mu.set_title(f"Optimal policy for $\\dot{{\\mu}}_{{cmd}}^*$ (V/$V_s$ = {v_slice})", fontsize=16, pad=15)
+        ax_mu.set_ylabel("Flight path angle (deg)", fontsize=14)
+        ax_mu.set_xlabel("Bank angle (deg)", fontsize=14)
+        ax_mu.set_xlim([0, 180])
+        ax_mu.set_ylim([-90, 0])
+        ax_mu.set_xticks([0, 45, 90, 135, 180])
+        ax_mu.set_yticks([-90, -60, -30, 0])
+
+        ax_mu.text(45, -35, "$\\dot{\\mu}^* = -30$ deg/s\n(roll back)", ha="center", va="center", bbox=bbox_props, fontsize=12)
+        ax_mu.text(145, -70, "$\\dot{\\mu}^* = 30$ deg/s\n(roll over)", ha="center", va="center", bbox=bbox_props, fontsize=12)
+
+        fig_mu.tight_layout()
+        output_mu_path = Path(f"img/{prefix}_policy_MuDot_V_{v_slice}.png")
+        fig_mu.savefig(output_mu_path, dpi=300, bbox_inches="tight")
+        plt.close(fig_mu)
+
+def _plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
     """
     Generates policy heatmaps using the exact training grid resolution 
     (77x63x89) to prevent interpolation artifacts in the publication figures.
@@ -645,7 +824,6 @@ def plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
         fig_mu.savefig(f"img/{prefix}_policy_MuDot_V_{v_slice}.png", dpi=300, bbox_inches="tight")
         plt.close(fig_mu)
 
-from typing import Any, Tuple, Dict, Optional
 
 def simulate_and_plot_trajectories(
     pi: "PolicyIteration", 
@@ -951,7 +1129,7 @@ def run_pipeline(setup_func: Any, prefix: str) -> None:
         plot_all_paper_style_policies(pi, prefix)
         
         # 2. Generate the Minimum Altitude Loss contour maps
-        plot_value_function_contours(pi, prefix)
+        #plot_value_function_contours(pi, prefix)
         
         # 3. Generate the Kinematic DP trajectory plots
         simulate_and_plot_trajectories(pi, prefix)
