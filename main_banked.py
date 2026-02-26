@@ -135,7 +135,8 @@ def setup_high_fidelity_banked_glider() -> tuple[
     )
     
     return env, states_space, action_space, config
-def _setup_high_fidelity_banked_glider() -> tuple[
+
+def setup_high_fidelity_banked_glider() -> tuple[
     gym.Env, np.ndarray, np.ndarray, PolicyIterationConfig
 ]:
     """
@@ -544,7 +545,7 @@ def plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
         fig_mu.savefig(f"img/{prefix}_policy_MuDot_V_{v_slice}.png", dpi=300, bbox_inches="tight")
         plt.close(fig_mu)
 
-def _plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
+def plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
     """
     Generates policy heatmaps using the exact training grid resolution 
     (77x63x89) to prevent interpolation artifacts in the publication figures.
@@ -644,13 +645,21 @@ def _plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
         fig_mu.savefig(f"img/{prefix}_policy_MuDot_V_{v_slice}.png", dpi=300, bbox_inches="tight")
         plt.close(fig_mu)
 
-def simulate_and_plot_trajectories(pi: PolicyIteration, prefix: str) -> None:
+from typing import Any, Tuple, Dict, Optional
+
+def simulate_and_plot_trajectories(
+    pi: "PolicyIteration", 
+    prefix: str,
+    casadi_results: Optional[Dict[Tuple[float, float], np.ndarray]] = None
+) -> None:
     """
-    Simulate and plot the optimal pullout trajectories to replicate 
-    Figures 3 and 4 from the reference aerospace publication.
+    Simulate and plot optimal pullout trajectories.
+    Compares the Dynamic Programming (DP) Policy against CasADi optimization.
     
-    Dynamically integrates spatial kinematics (x, h, xi) over time using 
-    the optimal control actions queried from the trained policy.
+    Performance Improvements:
+    - Memory pre-allocation for O(1) time complexity per integration step.
+    - Vectorized boundary condition checks via NumPy.
+    - Dependency injection for CasADi results to maintain decoupling.
     """
     if pi.n_dims != 3:
         logger.warning("Trajectory simulation requires the 3D environment. Skipping.")
@@ -664,17 +673,18 @@ def simulate_and_plot_trajectories(pi: PolicyIteration, prefix: str) -> None:
     air_density = env.airplane.AIR_DENSITY
     v_stall = env.airplane.STALL_AIRSPEED
 
-    # Configuration for the two main trajectory figures
     scenarios = [
         {"gamma_0_deg": -30.0, "fig_id": 3},
         {"gamma_0_deg": -60.0, "fig_id": 4}
     ]
 
-    # Initial bank angles and their respective visual X-axis offsets (from MATLAB code)
     mu_0_list = [150.0, 120.0, 90.0, 60.0, 30.0]
     x_offsets = [-180.0, -60.0, 0.0, 40.0, 80.0]
-    
     v_0_norm = 1.2
+    
+    # Terminal condition threshold: Pullout completed when gamma crosses horizon
+    gamma_threshold = np.deg2rad(-10)
+    max_steps = 2000
 
     for scenario in scenarios:
         gamma_0_deg = scenario["gamma_0_deg"]
@@ -685,75 +695,108 @@ def simulate_and_plot_trajectories(pi: PolicyIteration, prefix: str) -> None:
         fig, ax = plt.subplots(figsize=(10, 6))
         
         for mu_0_deg, x_offset in zip(mu_0_list, x_offsets):
-            # 1. Initialize Aerodynamic States
+            # ------------------------------------------------------------------
+            # 1. DP Policy Integration (Red Trajectory)
+            # ------------------------------------------------------------------
             gamma = np.deg2rad(gamma_0_deg)
             v_norm = v_0_norm
             mu = np.deg2rad(mu_0_deg)
             
-            # 2. Initialize Kinematic States
-            x = x_offset
-            h = 0.0
-            xi = 0.0  # Heading angle
+            x, h, xi = x_offset, 0.0, 0.0
             
-            # Trajectory history buffers
-            x_history, h_history = [], []
-
-            # Safety counter to prevent infinite loops in terminal states
+            # OPTIMIZATION: Pre-allocate NumPy arrays instead of using list.append()
+            # This prevents dynamic array resizing and memory fragmentation.
+            dp_traj = np.zeros((max_steps, 3), dtype=np.float32)  # Columns: [x, h, gamma]
+        
             step_count = 0
-            max_steps = 2000  # 20 seconds at dt=0.01
-
-            # Simulate until the aircraft crosses the horizon (gamma >= 0)
-            while gamma < 0.0 and step_count < max_steps:
-                x_history.append(x)
-                h_history.append(h)
-
-                state_vector = np.array([gamma, v_norm, mu], dtype=np.float32)
+            while not ((gamma >= 0.0) or (gamma <= -np.pi)) and step_count < max_steps:
+                dp_traj[step_count] = [x, h, gamma]
                 
-                # Query the PolicyIteration VRAM engine for the optimal action
+                state_vector = np.array([gamma, v_norm, mu], dtype=np.float32)
                 action, _ = get_optimal_action(state_vector, pi)
                 c_lift = action[0]
-                bank_rate = action[1]
 
-                # True airspeed in m/s
                 v_true = v_norm * v_stall
-                
-                # Dimensional lift force
                 lift_force = 0.5 * air_density * wing_area * (v_true ** 2) * c_lift
 
-                # Kinematic derivatives (Eq 12 from the reference paper)
                 h_dot = v_true * np.sin(gamma)
-                
-                # Prevent division by zero near vertical dives
                 cos_gamma = np.cos(gamma) if abs(np.cos(gamma)) > 1e-3 else 1e-3
                 xi_dot = (lift_force * np.sin(mu)) / (mass * v_true * cos_gamma)
-                
                 x_dot = v_true * np.cos(gamma) * np.cos(xi)
 
-                # Euler integration for spatial kinematics
+                # Spatial kinematics integration
                 h += h_dot * dt
                 xi += xi_dot * dt
                 x += x_dot * dt
 
-                # Step the aerodynamic environment to get the next (gamma, v_norm, mu)
+                # Step the environment for the next aerodynamic state
                 env.state = np.atleast_2d(state_vector)
                 next_state_matrix, _, _, _, _ = env.step(action)
                 next_state = next_state_matrix.flatten()
                 
                 gamma, v_norm, mu = next_state[0], next_state[1], next_state[2]
                 step_count += 1
-
-            # Plot the trajectory curve
-            ax.plot(x_history, h_history, color='darkred', linewidth=1.5, linestyle='-')
             
-            # Add subtle directional markers along the line
-            mark_every = max(1, len(x_history) // 10)
-            ax.plot(
-                x_history, h_history, color='black', 
-                marker='+', markersize=8, linestyle='None', 
-                markevery=mark_every, alpha=0.5
-            )
+            # Truncate the pre-allocated array to the actual number of steps computed
+            dp_traj = dp_traj[:step_count]
+            dp_cutoff = step_count
 
-        # Matplotlib Styling strictly matched to the paper
+            # ------------------------------------------------------------------
+            # 2. CasADi Trajectory Extraction & Vectorized Alignment
+            # ------------------------------------------------------------------
+            casadi_traj = None
+            if casadi_results is not None:
+                # Retrieve trajectory for the specific initial conditions
+                casadi_traj = casadi_results.get((gamma_0_deg, mu_0_deg))
+
+            if casadi_traj is not None:
+                # Vectorized search: find the first index where gamma >= threshold
+                casadi_gamma = casadi_traj[:, 2]
+                terminal_mask = casadi_gamma >= gamma_threshold
+                
+                if terminal_mask.any():
+                    casadi_cutoff = np.argmax(terminal_mask) + 1 
+                else:
+                    casadi_cutoff = len(casadi_traj)
+                
+                # CORE FIX: "Cut when EITHER cuts". 
+                # We take the minimum valid length between both models to sync the plot.
+                final_cutoff = min(dp_cutoff, casadi_cutoff)
+                
+                valid_casadi = casadi_traj[:final_cutoff]
+                valid_dp = dp_traj[:final_cutoff]
+                
+                # Plot CasADi (Light Blue / Celeste)
+                label_casadi = 'CasADi Optimizer' if mu_0_deg == mu_0_list[0] else ""
+                ax.plot(
+                    valid_casadi[:, 0], valid_casadi[:, 1], 
+                    color='skyblue', linewidth=3.0, label=label_casadi, zorder=1
+                )
+            else:
+                # Fallback if no CasADi data was injected
+                valid_dp = dp_traj
+
+            # ------------------------------------------------------------------
+            # 3. Plot DP Policy (Dark Red)
+            # ------------------------------------------------------------------
+            if len(valid_dp) > 0:
+                label_dp = 'DP Policy' if mu_0_deg == mu_0_list[0] else ""
+                ax.plot(
+                    valid_dp[:, 0], valid_dp[:, 1], 
+                    color='darkred', linewidth=1.5, linestyle='-', label=label_dp, zorder=2
+                )
+                
+                # Add directional markers strictly aligned with the truncated line
+                mark_every = max(1, len(valid_dp) // 10)
+                ax.plot(
+                    valid_dp[:, 0], valid_dp[:, 1], 
+                    color='black', marker='+', markersize=8, linestyle='None', 
+                    markevery=mark_every, alpha=0.5, zorder=3
+                )
+
+        # ----------------------------------------------------------------------
+        # 4. Matplotlib Styling Strictly Matched to the Publication
+        # ----------------------------------------------------------------------
         ax.set_title(
             f"Optimal pullout trajectories, starting from $\\gamma_0$ = {gamma_0_deg:.0f} deg\n"
             f"$\\mu_0$ = {{150, 120, 90, 60, 30}} deg (left to right), $V_0/V_s$ = 1.2",
@@ -769,12 +812,16 @@ def simulate_and_plot_trajectories(pi: PolicyIteration, prefix: str) -> None:
         ax.yaxis.set_major_locator(ticker.MultipleLocator(50))
         
         ax.grid(True, which='both', linestyle='-', color='gray', linewidth=0.5)
+        ax.legend(loc='best')
         
-        # Save output
+        # Save the figure securely
         plt.tight_layout()
-        output_path = Path(f"img/{prefix}_trajectory_Fig{fig_id}.png")
+        img_dir = Path("img")
+        img_dir.mkdir(parents=True, exist_ok=True)
+        
+        output_path = img_dir / f"{prefix}_trajectory_Fig{fig_id}.png"
         plt.savefig(output_path, dpi=300, bbox_inches="tight")
-        plt.close()
+        plt.close(fig)
         
         logger.info(f"[*] Trajectory plot successfully saved to {output_path.resolve()}")
 
@@ -913,5 +960,5 @@ def run_pipeline(setup_func: Any, prefix: str) -> None:
         validate_trajectories_with_casadi(pi, prefix)
 
 if __name__ == "__main__":
-    run_pipeline(setup_banked_glider_experiment, "banked_glider")
+    run_pipeline(setup_high_fidelity_banked_glider, "banked_glider")
     #run_profiling()
