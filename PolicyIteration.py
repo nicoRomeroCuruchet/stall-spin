@@ -314,19 +314,24 @@ class PolicyIteration:
 
     def _pull_tensors_from_gpu(self) -> None:
         """
-        Retrieves converged policy to CPU RAM.
+        Retrieves converged policy to CPU RAM using zero-copy transfers.
+        
         Memory Optimization:
-        Instead of allocating a massive dense One-Hot matrix (N_states x N_actions)
-        which causes an OOM exception (requiring ~67+ GB), we store the policy as a 
-        highly efficient 1D array of integers (N_states, ).
+        Instead of utilizing `cp.asnumpy()` which allocates intermediate buffers 
+        and spikes Host RAM, we strictly pre-allocate the memory blocks via 
+        `np.empty()` and stream the data directly into them in-place (O(1) overhead).
         """
         logger.info("Retrieving converged matrices from VRAM to CPU RAM...")
-        self.value_function = cp.asnumpy(self.d_value_function)
+        
+        # Pre-allocate without zero-initialization overhead
+        self.value_function = np.empty(self.n_states, dtype=np.float32)
+        self.policy = np.empty(self.n_states, dtype=np.int32)
 
-        # Retrieve the 1D optimal action indices directly.
-        # We deliberately avoid reconstructing the dense One-Hot matrix here
-        # to guarantee extreme memory efficiency and scalability.
-        self.policy = cp.asnumpy(self.d_policy)
+        # In-place stream from GPU hardware registers to Host RAM
+        self.d_value_function.get(out=self.value_function)
+        self.d_policy.get(out=self.policy)
+        
+        logger.info("Matrices successfully pulled to Host RAM.")
 
     def policy_evaluation(self) -> float:
         """Executes purely procedural evaluation on GPU."""
@@ -395,33 +400,71 @@ class PolicyIteration:
         self.save()
 
     def save(self, filepath: Path | None = None) -> None:
-        """Serialize and save the trained model to disk securely."""
+        """
+        Serialize and save the trained model to disk securely.
+        
+        Memory Optimization:
+        Bypasses Python's native `pickle` library, which causes massive RAM 
+        spikes (often 2x-3x the object size) when serializing large arrays, 
+        triggering OS SIGKILL (OOM). `np.savez` writes raw binary directly 
+        to disk efficiently.
+        """
         if filepath is None:
-            filepath = Path.cwd() / f"{self.env.unwrapped.__class__.__name__}_policy.pkl"
+            filepath = Path.cwd() / f"{self.env.unwrapped.__class__.__name__}_policy.npz"
+        
+        # Strictly enforce the highly efficient .npz extension
+        filepath = filepath.with_suffix(".npz")
 
-        # Dynamically detach GPU bindings to prevent 'TypeError: can't pickle object'
-        gpu_attrs = [
-            'd_states', 'd_actions', 'd_bounds_low', 'd_bounds_high', 
-            'd_grid_shape', 'd_strides', 'd_policy', 'd_value_function', 
-            'd_new_value_function', 'd_terminal_mask', 'eval_kernel', 'improve_kernel'
-        ]
-        for attr in gpu_attrs:
-            if hasattr(self, attr):
-                delattr(self, attr)
-
-        with filepath.open("wb") as f:
-            pickle.dump(self, f)
+        logger.info(f"Serializing policy to {filepath.resolve()}...")
+        
+        np.savez(
+            filepath,
+            value_function=self.value_function,
+            policy=self.policy,
+            bounds_low=self.bounds_low,
+            bounds_high=self.bounds_high,
+            grid_shape=self.grid_shape,
+            strides=self.strides,
+            corner_bits=self.corner_bits,
+            action_space=self.action_space
+        )
 
         logger.success(f"Policy saved successfully to {filepath.resolve()}")
 
     @classmethod
-    def load(cls, filepath: Path) -> "PolicyIteration":
-        """Load a saved policy instance from disk."""
-        with filepath.open("rb") as f:
-            instance = pickle.load(f)
+    def load(cls, filepath: Path, env: gym.Env = None) -> "PolicyIteration":
+        """
+        Load a saved policy instance from a serialized .npz archive.
+        
+        Memory Optimization:
+        Reconstructs the minimal class structure procedurally without 
+        triggering __init__. This completely avoids allocating massive 
+        state space grids in RAM during inference mode.
+        """
+        filepath = filepath.with_suffix(".npz")
+        
+        logger.info(f"Loading policy from {filepath.resolve()}...")
+        data = np.load(filepath)
 
-        if not isinstance(instance, cls):
-            raise TypeError("Loaded object is not a valid PolicyIteration instance.")
-
+        # Bypass standard initialization
+        instance = cls.__new__(cls)
+        instance.env = env
+        instance.config = PolicyIterationConfig()
+        
+        instance.value_function = data["value_function"]
+        instance.policy = data["policy"]
+        instance.bounds_low = data["bounds_low"]
+        instance.bounds_high = data["bounds_high"]
+        instance.grid_shape = data["grid_shape"]
+        instance.strides = data["strides"]
+        instance.corner_bits = data["corner_bits"]
+        instance.action_space = data["action_space"]
+        
+        instance.n_actions = len(instance.action_space)
+        instance.n_dims = len(instance.bounds_low)
+        
+        # Explicit cleanup to guarantee no massive grids are held in inference RAM
+        instance.states_space = None 
+        
         logger.success(f"Policy loaded successfully from {filepath.resolve()}")
         return instance

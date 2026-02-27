@@ -824,7 +824,6 @@ def _plot_all_paper_style_policies(pi: PolicyIteration, prefix: str) -> None:
         fig_mu.savefig(f"img/{prefix}_policy_MuDot_V_{v_slice}.png", dpi=300, bbox_inches="tight")
         plt.close(fig_mu)
 
-
 def simulate_and_plot_trajectories(
     pi: "PolicyIteration", 
     prefix: str,
